@@ -1,3 +1,7 @@
+# The CLI, lifted from its own published image so it floats with the same v3 tag.
+# Used by the build-time self-test below, and available to pipelines.
+FROM woodpeckerci/woodpecker-cli:v3-alpine AS cli
+
 # Woodpecker CI agent, prepared for Railway.
 #
 # Railway blocks unshare(2), so no container runtime can run inside a service and
@@ -67,6 +71,31 @@ RUN set -eux; \
     mv /bin/woodpecker-agent /bin/woodpecker-agent.real; \
     mv /bin/woodpecker-agent.wrapper /bin/woodpecker-agent; \
     chmod 0755 /bin/woodpecker-agent
+
+COPY --from=cli /bin/woodpecker-cli /usr/local/bin/woodpecker-cli
+
+# Self-test: run a real pipeline through the Local backend, as the unprivileged
+# user the agent will run as. A missing shell, a broken plugin-git or a botched
+# privilege drop fails the build here instead of crash-looping a container whose
+# log shows only an exit code.
+RUN set -eux; \
+    mkdir -p /tmp/selftest; \
+    printf '%s\n' \
+        'steps:' \
+        '  - name: selftest' \
+        '    image: bash' \
+        '    commands:' \
+        '      - echo "local backend reached"' \
+        '      - git --version' \
+        '      - node --version' \
+        '      - python3 --version' \
+        '      - jq --version' \
+        '      - command -v plugin-git' \
+        > /tmp/selftest/.woodpecker.yaml; \
+    chown -R 1000:1000 /tmp/selftest; \
+    cd /tmp/selftest; \
+    su-exec 1000:1000 woodpecker-cli exec --backend-engine local --local .woodpecker.yaml; \
+    rm -rf /tmp/selftest
 
 # Railway probes this; the agent serves /healthz on it.
 ENV PORT=3000
