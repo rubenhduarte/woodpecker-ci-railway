@@ -1,6 +1,6 @@
 # The CLI, lifted from its own published image so it floats with the same v3 tag.
 # Used by the build-time self-test below, and available to pipelines.
-FROM woodpeckerci/woodpecker-cli:v3-alpine AS cli
+FROM woodpeckerci/woodpecker-cli:v3-alpine@sha256:74c576faf49cce699825d11c7d7bd38ab5f007dd4f57cdbdd55099d2c0f2621a AS cli
 
 # Woodpecker CI agent, prepared for Railway.
 #
@@ -9,7 +9,7 @@ FROM woodpeckerci/woodpecker-cli:v3-alpine AS cli
 # the one Woodpecker ships that works here: pipeline steps run as plain processes
 # on this container. That needs a shell, a git toolchain and the `plugin-git`
 # clone binary, none of which the published agent image carries.
-FROM woodpeckerci/woodpecker-agent:v3-alpine
+FROM woodpeckerci/woodpecker-agent:v3-alpine@sha256:0b4b0afd7c1ff3e45f918eee16ef3797d710fd9e6ef73525e1a46ba030902777
 
 # The base ends on the alpine image's implicit root, but restate it so the layers
 # below are unambiguous if upstream ever adds a USER line.
@@ -61,6 +61,34 @@ RUN set -eux; \
     bash --version | head -n 1; \
     command -v plugin-git
 
+# Official Microsoft musl SDK, version and SHA-512 fixed at image build time.
+# Alpine dependencies follow Microsoft's supported Linux installation guidance.
+ARG DOTNET_SDK_VERSION=10.0.404
+ENV DOTNET_ROOT=/usr/share/dotnet \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+    DOTNET_NOLOGO=1
+RUN set -eux; \
+    cat /etc/alpine-release; \
+    uname -m; \
+    apk add --no-cache icu-libs icu-data-full krb5-libs libgcc libssl3 libstdc++ zlib; \
+    case "$(uname -m)" in \
+        x86_64) rid=linux-musl-x64; checksum=68ada5fd8fa2b65f55c3db1c2e773dfc9468c9828cbb56fc600151415cc2b116a32804f9aeeb82ca1a3229e3821af7b5b074d5e34487b2807630b5c00f51d801 ;; \
+        aarch64) rid=linux-musl-arm64; checksum=b39da19b6134190ed0b9107c05c98c58586f4f77782c4b0e3e36c6274a2d59528f67412c2b0cbb927a914378177f763cb662b435c5bef62ad5c2cd86a422c877 ;; \
+        *) echo "unsupported .NET SDK architecture" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --show-error --location --retry 3 \
+        "https://builds.dotnet.microsoft.com/dotnet/Sdk/${DOTNET_SDK_VERSION}/dotnet-sdk-${DOTNET_SDK_VERSION}-${rid}.tar.gz" \
+        --output /tmp/dotnet-sdk.tar.gz; \
+    printf '%s  %s\n' "$checksum" /tmp/dotnet-sdk.tar.gz | sha512sum -c -; \
+    mkdir -p "$DOTNET_ROOT"; \
+    tar -xzf /tmp/dotnet-sdk.tar.gz -C "$DOTNET_ROOT"; \
+    rm /tmp/dotnet-sdk.tar.gz; \
+    ln -s "$DOTNET_ROOT/dotnet" /usr/local/bin/dotnet; \
+    dotnet --info; \
+    dotnet --list-sdks; \
+    test "$(dotnet --version)" = "$DOTNET_SDK_VERSION"
+
 # The base image's ENTRYPOINT is ["/bin/woodpecker-agent"] with no CMD. Shim that
 # binary rather than declaring an ENTRYPOINT of our own, which would blank the
 # inherited CMD and force us to restate a start sequence that then rots against
@@ -91,6 +119,14 @@ RUN set -eux; \
         '      - python3 --version' \
         '      - jq --version' \
         '      - command -v plugin-git' \
+        '      - bash --version' \
+        '      - dotnet --info' \
+        '      - dotnet --list-sdks' \
+        '      - dotnet --list-sdks | grep -E "^10[.]"' \
+        '      - export DOTNET_CLI_HOME=/tmp/selftest/cli NUGET_PACKAGES=/tmp/selftest/packages' \
+        '      - dotnet new console --framework net10.0 --no-restore -o /tmp/selftest/app' \
+        '      - dotnet restore /tmp/selftest/app --ignore-failed-sources' \
+        '      - dotnet build /tmp/selftest/app -c Release --no-restore -m:1 -p:UseSharedCompilation=false' \
         > /tmp/selftest/.woodpecker.yaml; \
     chown -R 1000:1000 /tmp/selftest; \
     cd /tmp/selftest; \
